@@ -25,7 +25,7 @@ except ImportError:
     print("NudeNet not available. Install with: pip install nudenet")
 
 # Bot configuration
-BOT_TOKEN = "8071020805:AAFCJmacAnDBqq5loP_KRCcK2OU1n_hPpck"
+BOT_TOKEN = "7947027516:AAGFCc6tNRnf3ZVn9Yd6quIfBj1twTsPSi4"
 CHANNEL_ID = "@hayre37"
 ADMIN_USERNAME = "Hayre32"  # Bot administrator username
 AUTO_POST_ENABLED = True
@@ -170,13 +170,48 @@ def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
+def get_cancel_keyboard():
+    """Create a keyboard with cancel button."""
+    keyboard = [[KeyboardButton("❌ Cancel")]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Send a welcome message and check if user is registered."""
     user = update.effective_user
     user_id = user.id
 
+    # Log the start command for debugging
+    logger.info(f"Start command received from user {user_id} with args: {context.args}")
+
+    # Check if this is a deep link for contacting a seller
+    if context.args and context.args[0].startswith("contact_"):
+        # Extract product ID
+        product_id = context.args[0].split("_")[1]
+        logger.info(f"Deep link detected for product {product_id}")
+
+        # Check if user is registered
+        if not is_user_registered(user_id):
+            # Store the product ID for after registration
+            context.user_data['pending_contact_product_id'] = product_id
+            logger.info(f"User {user_id} not registered, storing pending contact for product {product_id}")
+
+            # Start registration process
+            await update.message.reply_html(
+                f"Welcome {user.mention_html()}! Before you can contact the seller, please complete a quick registration.\n\n"
+                f"What is your full name?"
+            )
+            return REGISTER_NAME
+
+        # User is registered, show seller contact information immediately
+        logger.info(f"User {user_id} is registered, showing seller contact for product {product_id}")
+        await show_seller_contact_from_deeplink(update, context, product_id)
+        return MAIN_MENU
+
+    # Regular start command (not a deep link)
     # Check if user is registered
     if not is_user_registered(user_id):
+        logger.info(f"New user {user_id} starting registration")
         # Start registration process
         await update.message.reply_html(
             f"Welcome {user.mention_html()}! Before you can use the bot, please complete a quick registration.\n\n"
@@ -184,16 +219,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return REGISTER_NAME
 
-    # Check if this is a deep link for contacting a seller
-    if context.args and context.args[0].startswith("contact_"):
-        # Extract product ID
-        product_id = context.args[0].split("_")[1]
-
-        # Show seller contact information
-        await show_seller_contact_from_deeplink(update, context, product_id)
-        return MAIN_MENU
-
     # User is already registered, show main menu
+    logger.info(f"Registered user {user_id} accessing main menu")
     await update.message.reply_html(
         f"Hi {user.mention_html()}! Welcome to the Product Management Bot.\n\n"
         f"Use the menu below to navigate:",
@@ -302,6 +329,7 @@ async def register_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         }
 
         save_user_data(user.id, user_data)
+        logger.info(f"User {user.id} completed registration")
 
         # Welcome the user
         await query.message.reply_text(
@@ -312,6 +340,7 @@ async def register_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Check if there's a pending contact request
         if 'pending_contact_product_id' in context.user_data:
             product_id = context.user_data['pending_contact_product_id']
+            logger.info(f"Processing pending contact request for product {product_id}")
             await show_seller_contact_from_deeplink(query.message, context, product_id)
             del context.user_data['pending_contact_product_id']
 
@@ -361,12 +390,27 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return await contact_us(update, context)
     elif text == "🔍 Explore Products":
         return await explore_products(update, context)
+    elif text == "❌ Cancel":
+        await update.message.reply_text(
+            "Returning to main menu.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return MAIN_MENU
     else:
         await update.message.reply_text(
             "Please select an option from the menu.",
             reply_markup=get_main_menu_keyboard()
         )
         return MAIN_MENU
+
+
+async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle cancel button press from any state."""
+    await update.message.reply_text(
+        "Operation cancelled. Returning to main menu.",
+        reply_markup=get_main_menu_keyboard()
+    )
+    return MAIN_MENU
 
 
 async def my_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -610,11 +654,22 @@ async def show_product_page(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     for product in current_products:
         # Create inline keyboard for each product
-        keyboard = [
-            [InlineKeyboardButton("📞 Contact Seller",
-                                  url=f"https://t.me/{context.bot.username}?start=contact_{product['id']}")],
-            [InlineKeyboardButton("📋 Product Details", callback_data=f"product_details_{product['id']}")]
-        ]
+        keyboard = []
+        # Add Contact Seller button if seller has a username
+        if product.get('poster_username'):
+            keyboard.append([InlineKeyboardButton("📞 Contact Seller",
+                                                  url=f"https://t.me/{product.get('poster_username')}")])
+        else:
+            # Fallback to deep link if no username
+            keyboard.append([InlineKeyboardButton("📞 Contact Seller",
+                                                  url=f"https://t.me/{context.bot.username}?start=item_{product['id']}")])
+        keyboard.append([InlineKeyboardButton("📋 Product Details", callback_data=f"product_details_{product['id']}")])
+
+        # Add View Post button if the product has been posted and has a message_id
+        if product.get('posted', False) and product.get('channel_message_id'):
+            keyboard.append([InlineKeyboardButton("👁️ View Post",
+                                                  url=f"https://t.me/{CHANNEL_ID.replace('@', '')}/{product['channel_message_id']}")])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Status indicator
@@ -675,13 +730,16 @@ async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # Add custom category option
     keyboard.append([InlineKeyboardButton("➕ Custom Category", callback_data="custom_category")])
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "Let's add a new product! First, select a category for your product:",
+        "📂 Main Category: ይምረጡ (ለምሳሌ፡ 'Electronics')።",
         reply_markup=reply_markup
+    )
+    await update.message.reply_text(
+        "Or use the button below to cancel:",
+        reply_markup=get_cancel_keyboard()
     )
     return SELECT_CATEGORY
 
@@ -690,6 +748,12 @@ async def select_product_category(update: Update, context: ContextTypes.DEFAULT_
     """Handle category selection for a new product."""
     query = update.callback_query
     await query.answer()
+
+    # Delete the original message with inline keyboard
+    try:
+        await query.message.delete()
+    except Exception as e:
+        logger.error(f"Error deleting message: {e}")
 
     if query.data.startswith("category_"):
         category = query.data[9:]  # Remove "category_" prefix
@@ -704,24 +768,24 @@ async def select_product_category(update: Update, context: ContextTypes.DEFAULT_
 
         keyboard.append([InlineKeyboardButton("➕ Custom Subcategory", callback_data="custom_subcategory")])
         keyboard.append([InlineKeyboardButton("🔙 Back to Categories", callback_data="back_to_categories")])
-        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.edit_message_text(
-            f"Selected category: {category}\n\nNow, select a subcategory:",
+        await query.message.reply_text(
+            f"Selected category: {category}\n\n📂 Sub Category: ይምረጡ (ለምሳሌ፡ Accessories )።",
             reply_markup=reply_markup
+        )
+        await query.message.reply_text(
+            "Or use the button below to cancel:",
+            reply_markup=get_cancel_keyboard()
         )
         return SELECT_SUBCATEGORY
 
     elif query.data == "custom_category":
-        await query.edit_message_text(
+        await query.message.reply_text(
             "Please enter a custom category for your product.\n"
             "Make sure it starts with # (e.g., #Fashion, #Technology):",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Back", callback_data="back_to_categories"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")
-            ]])
+            reply_markup=get_cancel_keyboard()
         )
         return CUSTOM_TAG
 
@@ -736,28 +800,29 @@ async def select_product_subcategory(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
 
+    # Delete the original message with inline keyboard
+    try:
+        await query.message.delete()
+    except Exception as e:
+        logger.error(f"Error deleting message: {e}")
+
     if query.data.startswith("subcategory_"):
         subcategory = query.data[12:]  # Remove "subcategory_" prefix
         context.user_data['product_subcategory'] = subcategory
 
-        await query.edit_message_text(
+        await query.message.reply_text(
             f"Selected category: {context.user_data.get('product_category')}\n"
             f"Selected subcategory: {subcategory}\n\n"
-            f"Now, what's the product name?",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")
-            ]])
+            f"✍🏻 የምርትዎን ስም ያስገቡ (ግልፅ ይሁን)።",
+            reply_markup=get_cancel_keyboard()
         )
         return PRODUCT_NAME
 
     elif query.data == "custom_subcategory":
-        await query.edit_message_text(
+        await query.message.reply_text(
             "Please enter a custom subcategory for your product.\n"
             "Make sure it starts with # (e.g., #Premium, #Budget):",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Back", callback_data=f"category_{context.user_data.get('product_category')}"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")
-            ]])
+            reply_markup=get_cancel_keyboard()
         )
         return CUSTOM_TAG
 
@@ -783,8 +848,7 @@ async def custom_product_tag(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Ask for subcategory
         keyboard = [
             [InlineKeyboardButton("➕ Custom Subcategory", callback_data="custom_subcategory")],
-            [InlineKeyboardButton("Skip Subcategory", callback_data="skip_subcategory")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")]
+            [InlineKeyboardButton("Skip Subcategory", callback_data="skip_subcategory")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -792,16 +856,16 @@ async def custom_product_tag(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"Custom category set: {tag}\n\nNow, select or create a subcategory:",
             reply_markup=reply_markup
         )
+        await update.message.reply_text(
+            "Or use the button below to cancel:",
+            reply_markup=get_cancel_keyboard()
+        )
         return SELECT_SUBCATEGORY
     else:
         # We're setting the subcategory
-        context.user_data['product_subcategory'] = tag
-
         await update.message.reply_text(
-            f"Custom subcategory set: {tag}\n\nNow, what's the product name?",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")
-            ]])
+            f"Custom subcategory set: {tag}\n\n✍🏻 የምርትዎን ስም ያስገቡ (ግልፅ ይሁን)።",
+            reply_markup=get_cancel_keyboard()
         )
         return PRODUCT_NAME
 
@@ -810,10 +874,8 @@ async def product_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     """Store the product name and ask for description."""
     context.user_data['product_name'] = update.message.text
     await update.message.reply_text(
-        "Great! Now, please provide a description for the product.",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")
-        ]])
+        "✍️ Description: ስለ ምርትዎ ተጨማሪ መረጃ ይስጡ (ልዩ ባህሪያቱ ምንድን ናቸው?)።",
+        reply_markup=get_cancel_keyboard()
     )
     return PRODUCT_DESCRIPTION
 
@@ -822,10 +884,8 @@ async def product_description(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Store the product description and ask for price."""
     context.user_data['product_description'] = update.message.text
     await update.message.reply_text(
-        "What's the price of the product in ETB (Ethiopian Birr)?",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")
-        ]])
+        "💵 Price: የምርትዎን ዋጋ ያስገቡ ።",
+        reply_markup=get_cancel_keyboard()
     )
     return PRODUCT_PRICE
 
@@ -838,17 +898,13 @@ async def product_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.message.reply_text(
             "Please send an image of the product.\n\n"
             "Note: The image width should be greater than or equal to its height for proper display.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")
-            ]])
+            reply_markup=get_cancel_keyboard()
         )
         return PRODUCT_IMAGE
     except ValueError:
         await update.message.reply_text(
             "Please enter a valid price (numbers only).",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")
-            ]])
+            reply_markup=get_cancel_keyboard()
         )
         return PRODUCT_PRICE
 
@@ -908,9 +964,7 @@ async def product_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             await update.message.reply_text(
                 f"⚠️ {issue_type}: {message}\n\n"
                 "Please send a different image that meets our requirements.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")
-                ]])
+                reply_markup=get_cancel_keyboard()
             )
             return PRODUCT_IMAGE
 
@@ -938,7 +992,8 @@ async def product_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             'poster_name': user_data.get('name', ''),
             'poster_phone': user_data.get('phone', ''),
             'poster_address': user_data.get('address', ''),
-            'scheduled_time': None
+            'scheduled_time': None,
+            'channel_message_id': None  # Store the message ID when posted to channel
         }
 
         # Store in context for scheduling
@@ -971,9 +1026,7 @@ async def product_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     else:
         await update.message.reply_text(
             "Please send an image file.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")
-            ]])
+            reply_markup=get_cancel_keyboard()
         )
         return PRODUCT_IMAGE
 
@@ -983,6 +1036,12 @@ async def handle_scheduling(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     await query.answer()
 
+    # Delete the original message with inline keyboard
+    try:
+        await query.message.delete()
+    except Exception as e:
+        logger.error(f"Error deleting message: {e}")
+
     if query.data == "schedule_now":
         # Save the product
         product = context.user_data['product']
@@ -991,11 +1050,30 @@ async def handle_scheduling(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         save_products(products)
 
         # Post immediately
-        await post_product_by_id(context, product['id'])
+        post_result = await post_product_by_id(context, product['id'])
 
-        await query.edit_message_text(
-            f"✅ Product '{product['name']}' has been added and posted to the channel!"
-        )
+        if post_result['success']:
+            await query.message.reply_text(
+                f"✅ Product '{product['name']}' has been added and posted to the channel!"
+            )
+
+            # Show view post button if available
+            if post_result.get('message_id'):
+                keyboard = [
+                    [InlineKeyboardButton("👁️ View Post",
+                                          url=f"https://t.me/{CHANNEL_ID.replace('@', '')}/{post_result['message_id']}")],
+                    [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_main")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.message.reply_text(
+                    "You can view your posted product in the channel:",
+                    reply_markup=reply_markup
+                )
+        else:
+            await query.message.reply_text(
+                f"❌ Error posting product: {post_result['message']}"
+            )
 
         # Show main menu
         await query.message.reply_text(
@@ -1005,10 +1083,11 @@ async def handle_scheduling(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return MAIN_MENU
 
     elif query.data == "schedule_later":
-        await query.edit_message_text(
+        await query.message.reply_text(
             "When would you like to schedule this post? Please enter date and time in format:\n"
             "YYYY-MM-DD HH:MM\n\n"
-            "For example: 2025-05-15 14:30"
+            "For example: 2025-05-15 14:30",
+            reply_markup=get_cancel_keyboard()
         )
         return SCHEDULE_POST
 
@@ -1019,7 +1098,7 @@ async def handle_scheduling(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         products.append(product)
         save_products(products)
 
-        await query.edit_message_text(
+        await query.message.reply_text(
             f"✅ Product '{product['name']}' has been saved to your products."
         )
 
@@ -1043,7 +1122,8 @@ async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         if not re.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$', text):
             await update.message.reply_text(
                 "Invalid format. Please use YYYY-MM-DD HH:MM format.\n"
-                "For example: 2025-05-15 14:30"
+                "For example: 2025-05-15 14:30",
+                reply_markup=get_cancel_keyboard()
             )
             return SCHEDULE_POST
 
@@ -1052,7 +1132,8 @@ async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         # Check if the time is in the future
         if scheduled_time <= datetime.now():
             await update.message.reply_text(
-                "The scheduled time must be in the future. Please enter a future date and time."
+                "The scheduled time must be in the future. Please enter a future date and time.",
+                reply_markup=get_cancel_keyboard()
             )
             return SCHEDULE_POST
 
@@ -1082,7 +1163,8 @@ async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     except ValueError:
         await update.message.reply_text(
             "Invalid date format. Please use YYYY-MM-DD HH:MM format.\n"
-            "For example: 2025-05-15 14:30"
+            "For example: 2025-05-15 14:30",
+            reply_markup=get_cancel_keyboard()
         )
         return SCHEDULE_POST
 
@@ -1104,9 +1186,14 @@ async def post_scheduled_product(product_id, bot):
 
     try:
         # Create inline keyboard with contact seller button
-        keyboard = [
-            [InlineKeyboardButton("📞 Contact Seller", url=f"https://t.me/{bot.username}?start=contact_{product_id}")]
-        ]
+        keyboard = []
+        if product.get('poster_username'):
+            keyboard.append([InlineKeyboardButton("📞 Contact Seller",
+                                                  url=f"https://t.me/{product.get('poster_username')}")])
+        else:
+            # Fallback to deep link if no username
+            keyboard.append([InlineKeyboardButton("📞 Contact Seller",
+                                                  url=f"https://t.me/{bot.username}?start=item_{product_id}")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Format category info
@@ -1118,7 +1205,7 @@ async def post_scheduled_product(product_id, bot):
             category_info += "\n\n"
 
         # Post to channel
-        await bot.send_photo(
+        message = await bot.send_photo(
             chat_id=CHANNEL_ID,
             photo=product['image_file_id'],
             caption=f"🆕 NEW PRODUCT 🆕\n\n"
@@ -1130,11 +1217,12 @@ async def post_scheduled_product(product_id, bot):
             reply_markup=reply_markup
         )
 
-        # Update product status
+        # Update product status and store message ID
         for p in products:
             if p.get('id') == product_id:
                 p['posted'] = True
                 p['post_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                p['channel_message_id'] = message.message_id
                 break
 
         save_products(products)
@@ -1159,6 +1247,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handle button callbacks."""
     query = update.callback_query
     await query.answer()
+
+    # Delete the original message with inline keyboard
+    try:
+        await query.message.delete()
+    except Exception as e:
+        logger.error(f"Error deleting message: {e}")
 
     # Main menu navigation
     if query.data == "back_to_main":
@@ -1190,13 +1284,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return await select_product_subcategory(update, context)
 
     elif query.data == "skip_subcategory":
-        await query.edit_message_text(
+        await query.message.reply_text(
             f"Selected category: {context.user_data.get('product_category')}\n"
             f"Subcategory: Skipped\n\n"
             f"Now, what's the product name?",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_product")
-            ]])
+            reply_markup=get_cancel_keyboard()
         )
         return PRODUCT_NAME
 
@@ -1211,12 +1303,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Post product
     elif query.data.startswith("post_"):
         product_id = query.data.split("_")[1]
-        success = await post_product_by_id(context, product_id, query)
-        if success:
+        post_result = await post_product_by_id(context, product_id)
+
+        if post_result['success']:
+            # Show success message with view post button if available
+            if post_result.get('message_id'):
+                keyboard = [
+                    [InlineKeyboardButton("👁️ View Post",
+                                          url=f"https://t.me/{CHANNEL_ID.replace('@', '')}/{post_result['message_id']}")],
+                    [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_main")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.message.reply_text(
+                    "✅ Product posted successfully! You can view it in the channel:",
+                    reply_markup=reply_markup
+                )
+            else:
+                await query.message.reply_text(
+                    "✅ Product posted successfully!",
+                    reply_markup=get_main_menu_keyboard()
+                )
+        else:
             await query.message.reply_text(
-                "Product posted successfully!",
+                f"❌ Error posting product: {post_result['message']}",
                 reply_markup=get_main_menu_keyboard()
             )
+
         return MAIN_MENU
 
     # Delete product
@@ -1277,6 +1390,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Profile editing feature is currently under development.",
             reply_markup=get_main_menu_keyboard()
         )
+        return MAIN_MENU
+
+    # View post in channel
+    elif query.data.startswith("view_post_"):
+        product_id = query.data.split("_")[2]
+        products = load_products()
+
+        # Find the product
+        product = None
+        for p in products:
+            if p.get('id') == product_id:
+                product = p
+                break
+
+        if product and product.get('channel_message_id'):
+            # Redirect to the post in the channel
+            await query.message.reply_text(
+                f"Opening the post in the channel...",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("👁️ View Post",
+                                         url=f"https://t.me/{CHANNEL_ID.replace('@', '')}/{product['channel_message_id']}")
+                ]])
+            )
+        else:
+            await query.message.reply_text(
+                "Post not found or not yet published to the channel.",
+                reply_markup=get_main_menu_keyboard()
+            )
+
         return MAIN_MENU
 
     return MAIN_MENU
@@ -1365,7 +1507,7 @@ async def show_seller_contact(query, context, product_id):
             break
 
     if not product:
-        await query.edit_message_text(
+        await query.message.reply_text(
             "Product information not found.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Back", callback_data="back_to_main")
@@ -1382,17 +1524,23 @@ async def show_seller_contact(query, context, product_id):
     message = (
         f"📞 <b>Seller Contact Information</b>\n\n"
         f"Product: <b>{product['name']}</b>\n\n"
+        f"<b>👤 @{seller_username}</b>\n"
         f"Seller Name: {seller_name}\n"
         f"Phone: {seller_phone}\n"
-        f"Username: @{seller_username}\n"
         f"Address: {seller_address}\n\n"
         f"You can contact the seller directly about this product."
     )
 
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data=f"product_details_{product_id}")]]
+
+    # Add View Post button if the product has been posted
+    if product.get('posted', False) and product.get('channel_message_id'):
+        keyboard.append([InlineKeyboardButton("👁️ View Post",
+                                              url=f"https://t.me/{CHANNEL_ID.replace('@', '')}/{product['channel_message_id']}")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.edit_message_text(
+    await query.message.reply_text(
         message,
         reply_markup=reply_markup,
         parse_mode='HTML'
@@ -1429,6 +1577,12 @@ async def list_user_products(query, context):
                 [InlineKeyboardButton("✏️ Edit", callback_data=f"edit_{product['id']}")],
                 [InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_{product['id']}")]
             ]
+
+            # Add View Post button if the product has been posted
+            if product.get('posted', False) and product.get('channel_message_id'):
+                keyboard.append([InlineKeyboardButton("👁️ View Post",
+                                                      url=f"https://t.me/{CHANNEL_ID.replace('@', '')}/{product['channel_message_id']}")])
+
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             # Format category info
@@ -1477,7 +1631,8 @@ async def handle_product_scheduling(query, context, product_id):
     await query.message.reply_text(
         f"When would you like to schedule '{product['name']}' for posting?\n\n"
         "Please enter date and time in format: YYYY-MM-DD HH:MM\n"
-        "For example: 2025-05-15 14:30"
+        "For example: 2025-05-15 14:30",
+        reply_markup=get_cancel_keyboard()
     )
 
     return SCHEDULE_POST
@@ -1532,7 +1687,7 @@ async def refresh_preferences(query, context):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.edit_message_text(
+    await query.message.reply_text(
         "⭐ <b>Preferences</b>\n\n"
         "Customize your experience by adjusting the settings below:",
         reply_markup=reply_markup,
@@ -1554,7 +1709,7 @@ async def show_product_details(query, context, product_id):
             break
 
     if not product:
-        await query.edit_message_text(
+        await query.message.reply_text(
             "Product not found.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Back", callback_data="back_to_main")
@@ -1568,11 +1723,6 @@ async def show_product_details(query, context, product_id):
     elif product.get('posted', False):
         status = f"✅ Posted"
     else:
-        status = "⏳ Not posted yet"
-
-    # Format category info
-    category_info = ""
-    if product:
         status = "⏳ Not posted yet"
 
     # Format category info
@@ -1600,15 +1750,19 @@ async def show_product_details(query, context, product_id):
     if not product.get('posted', False):
         keyboard.append([InlineKeyboardButton("📢 Post Now", callback_data=f"post_{product['id']}")])
 
-    keyboard.extend([
-        [InlineKeyboardButton("📞 Contact Seller", callback_data=f"contact_seller_{product['id']}")],
-        [InlineKeyboardButton("🔙 Back", callback_data="back_to_main")]
-    ])
+    keyboard.append([InlineKeyboardButton("📞 Contact Seller", callback_data=f"contact_seller_{product['id']}")])
+
+    # Add View Post button if the product has been posted
+    if product.get('posted', False) and product.get('channel_message_id'):
+        keyboard.append([InlineKeyboardButton("👁️ View Post",
+                                              url=f"https://t.me/{CHANNEL_ID.replace('@', '')}/{product['channel_message_id']}")])
+
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_main")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     # Edit the message with detailed info
-    await query.edit_message_text(
+    await query.message.reply_text(
         message,
         reply_markup=reply_markup,
         parse_mode='HTML'
@@ -1618,6 +1772,7 @@ async def show_product_details(query, context, product_id):
 async def post_product_by_id(context, product_id, query=None):
     """Post a product to the channel by its ID."""
     products = load_products()
+    result = {'success': False, 'message': '', 'message_id': None}
 
     # Find the product with the given ID
     product = None
@@ -1627,17 +1782,21 @@ async def post_product_by_id(context, product_id, query=None):
             break
 
     if not product:
-        message = "Product not found."
+        result['message'] = "Product not found."
         if query:
-            await query.edit_message_text(message)
-        return False
+            await query.message.reply_text(result['message'])
+        return result
 
     try:
         # Create inline keyboard with contact seller button
-        keyboard = [
-            [InlineKeyboardButton("📞 Contact Seller",
-                                  url=f"https://t.me/{context.bot.username}?start=contact_{product_id}")]
-        ]
+        keyboard = []
+        if product.get('poster_username'):
+            keyboard.append([InlineKeyboardButton("📞 Contact Seller",
+                                                  url=f"https://t.me/{product.get('poster_username')}")])
+        else:
+            # Fallback to deep link if no username
+            keyboard.append([InlineKeyboardButton("📞 Contact Seller",
+                                                  url=f"https://t.me/{context.bot.username}?start=item_{product_id}")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Format category info
@@ -1649,7 +1808,7 @@ async def post_product_by_id(context, product_id, query=None):
             category_info += "\n\n"
 
         # Post to channel
-        await context.bot.send_photo(
+        message = await context.bot.send_photo(
             chat_id=CHANNEL_ID,
             photo=product['image_file_id'],
             caption=f"🆕 NEW PRODUCT 🆕\n\n"
@@ -1661,32 +1820,36 @@ async def post_product_by_id(context, product_id, query=None):
             reply_markup=reply_markup
         )
 
-        # Update product status
+        # Update product status and store message ID
         for p in products:
             if p.get('id') == product_id:
                 p['posted'] = True
                 p['post_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                p['channel_message_id'] = message.message_id
                 break
 
         save_products(products)
         posted_products.add(product_id)
 
-        message = f"Product '{product['name']}' posted to the channel successfully!"
-        if query:
-            await query.edit_message_text(message)
+        result['success'] = True
+        result['message'] = f"Product '{product['name']}' posted to the channel successfully!"
+        result['message_id'] = message.message_id
 
-        return True
+        if query:
+            await query.message.reply_text(result['message'])
+
+        return result
 
     except Exception as e:
         logger.error(f"Error posting to channel: {e}")
-        message = (
+        result['message'] = (
             f"Error posting to channel. Make sure the bot is an admin in the channel "
             f"and has posting permissions.\n\nError: {str(e)}"
         )
         if query:
-            await query.edit_message_text(message)
+            await query.message.reply_text(result['message'])
 
-        return False
+        return result
 
 
 async def auto_post_products(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1719,8 +1882,8 @@ async def auto_post_products(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.info(f"Skipping auto-post for product '{product['name']}' as user has disabled auto-post")
                 continue
 
-        success = await post_product_by_id(context, product['id'])
-        if success:
+        post_result = await post_product_by_id(context, product['id'])
+        if post_result['success']:
             logger.info(f"Auto-posted product: {product['name']}")
         else:
             logger.error(f"Failed to auto-post product: {product['name']}")
@@ -1732,16 +1895,19 @@ async def auto_post_products(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_deep_linking(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle deep linking for contact seller."""
     user = update.effective_user
+    logger.info(f"Deep linking handler called for user {user.id} with args: {context.args}")
 
     # Check if this is a deep link
-    if context.args and context.args[0].startswith("contact_"):
+    if context.args and (context.args[0].startswith("contact_") or context.args[0].startswith("item_")):
         # Extract product ID
         product_id = context.args[0].split("_")[1]
+        logger.info(f"Processing deep link for product {product_id}")
 
         # Check if user is registered
         if not is_user_registered(user.id):
             # Store the product ID for after registration
             context.user_data['pending_contact_product_id'] = product_id
+            logger.info(f"User {user.id} not registered, storing pending contact for product {product_id}")
 
             # Start registration process
             await update.message.reply_html(
@@ -1750,16 +1916,27 @@ async def handle_deep_linking(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return REGISTER_NAME
 
-        # User is registered, show seller contact
+        # User is registered, immediately show seller contact
+        logger.info(f"User {user.id} is registered, showing seller contact for product {product_id}")
         await show_seller_contact_from_deeplink(update, context, product_id)
         return MAIN_MENU
 
     # Regular start command
+    logger.info(f"No deep link detected, proceeding with normal start for user {user.id}")
     return await start(update, context)
 
 
 async def show_seller_contact_from_deeplink(update, context, product_id):
     """Show seller contact information from deep link."""
+    logger.info(f"Showing seller contact for product {product_id}")
+
+    # Delete any previous messages if this is a callback query
+    if hasattr(update, 'callback_query') and update.callback_query:
+        try:
+            await update.callback_query.message.delete()
+        except Exception as e:
+            logger.error(f"Error deleting message: {e}")
+
     products = load_products()
 
     # Find the product
@@ -1770,6 +1947,7 @@ async def show_seller_contact_from_deeplink(update, context, product_id):
             break
 
     if not product:
+        logger.error(f"Product {product_id} not found when trying to show seller contact")
         await update.message.reply_text(
             "Product information not found.",
             reply_markup=get_main_menu_keyboard()
@@ -1782,20 +1960,96 @@ async def show_seller_contact_from_deeplink(update, context, product_id):
     seller_username = product.get('poster_username', 'Not provided')
     seller_address = product.get('poster_address', 'Not provided')
 
-    message = (
-        f"📞 <b>Seller Contact Information</b>\n\n"
-        f"Product: <b>{product['name']}</b>\n\n"
-        f"Seller Name: {seller_name}\n"
-        f"Phone: {seller_phone}\n"
-        f"Username: @{seller_username}\n"
-        f"Address: {seller_address}\n\n"
-        f"You can contact the seller directly about this product."
+    # Format product price
+    price = f"{product.get('price', 0):.2f} ETB"
+
+    # Create caption with seller details
+    caption = (
+        f"🔔 <b>NEW LISTING: {product['name']}</b>\n\n"
+        f"💰 <b>Price:</b> {price}\n\n"
+        f"👤 <b>SELLER DETAILS:</b>\n"
+        f"<b>👤 @{seller_username}</b>\n"
+        f"📋 <b>Name:</b> {seller_name}\n"
+        f"📱 <b>Phone:</b> {seller_phone}\n"
+        f"📍 <b>Address:</b> {seller_address}\n\n"
+        f"⌛️ <b>Only one available!</b>"
     )
 
-    await update.message.reply_html(
-        message,
-        reply_markup=get_main_menu_keyboard()
-    )
+    keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_main")]]
+
+    # Add View Post button if the product has been posted
+    if product.get('posted', False) and product.get('channel_message_id'):
+        keyboard.insert(0, [InlineKeyboardButton("👁️ View Post",
+                                                 url=f"https://t.me/{CHANNEL_ID.replace('@', '')}/{product['channel_message_id']}")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Send product image with seller information as caption
+    try:
+        await update.message.reply_photo(
+            photo=product['image_file_id'],
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logger.error(f"Error sending product image: {e}")
+        # Fallback to text-only message if image sending fails
+        await update.message.reply_html(
+            caption,
+            reply_markup=reply_markup
+        )
+
+    # Log that contact information was viewed
+    logger.info(f"User {update.effective_user.id} viewed seller contact for product {product['id']}")
+
+    # Notify the seller that someone is interested (if notifications are enabled)
+    await notify_seller_of_interest(context, product, update.effective_user)
+
+
+async def notify_seller_of_interest(context, product, interested_user):
+    """Notify the seller that someone is interested in their product."""
+    # Check if the product has a seller ID
+    seller_id = product.get('poster_id')
+    if not seller_id:
+        return
+
+    # Get seller preferences
+    seller_prefs = get_user_preferences(seller_id)
+
+    # Only send notification if seller has notifications enabled
+    if not seller_prefs.get('notifications', True):
+        return
+
+    try:
+        # Format buyer info
+        buyer_name = interested_user.first_name
+        if interested_user.last_name:
+            buyer_name += f" {interested_user.last_name}"
+
+        buyer_username = f"@{interested_user.username}" if interested_user.username else "No username"
+
+        # Get buyer data if registered
+        buyer_data = get_user_data(interested_user.id)
+        buyer_phone = buyer_data.get('phone', 'Not provided') if buyer_data else 'Not provided'
+
+        # Send notification to seller
+        await context.bot.send_message(
+            chat_id=seller_id,
+            text=f"🔔 <b>New Buyer Interest!</b>\n\n"
+                 f"Someone is interested in your product: <b>{product['name']}</b>\n\n"
+                 f"<b>Potential Buyer:</b>\n"
+                 f"Name: {buyer_name}\n"
+                 f"Username: {buyer_username}\n\n"
+                 f"They have viewed your contact information and may contact you soon.",
+            parse_mode='HTML'
+        )
+
+        logger.info(
+            f"Notified seller {seller_id} about interest from user {interested_user.id} in product {product['id']}")
+
+    except Exception as e:
+        logger.error(f"Failed to notify seller {seller_id}: {e}")
 
 
 def main() -> None:
@@ -1809,45 +2063,71 @@ def main() -> None:
         states={
             # Main menu states
             MAIN_MENU: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_main_menu),
-                CallbackQueryHandler(button_callback)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex('^❌ Cancel$'), handle_main_menu),
+                CallbackQueryHandler(button_callback),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
             ],
 
             # Registration states
-            REGISTER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_name)],
-            REGISTER_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, register_phone),
-                MessageHandler(filters.CONTACT, register_phone)  # Handle shared contact
+            REGISTER_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex('^❌ Cancel$'), register_name),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
             ],
-            REGISTER_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_address)],
-            REGISTER_CONFIRM: [CallbackQueryHandler(register_confirm)],
+            REGISTER_PHONE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex('^❌ Cancel$'), register_phone),
+                MessageHandler(filters.CONTACT, register_phone),  # Handle shared contact
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
+            ],
+            REGISTER_ADDRESS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex('^❌ Cancel$'), register_address),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
+            ],
+            REGISTER_CONFIRM: [
+                CallbackQueryHandler(register_confirm),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
+            ],
 
             # Product creation states
-            SELECT_CATEGORY: [CallbackQueryHandler(select_product_category)],
-            SELECT_SUBCATEGORY: [CallbackQueryHandler(select_product_subcategory)],
-            CUSTOM_TAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_product_tag)],
+            SELECT_CATEGORY: [
+                CallbackQueryHandler(select_product_category),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
+            ],
+            SELECT_SUBCATEGORY: [
+                CallbackQueryHandler(select_product_subcategory),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
+            ],
+            CUSTOM_TAG: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex('^❌ Cancel$'), custom_product_tag),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
+            ],
             PRODUCT_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, product_name),
-                CallbackQueryHandler(button_callback)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex('^❌ Cancel$'), product_name),
+                CallbackQueryHandler(button_callback),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
             ],
             PRODUCT_DESCRIPTION: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, product_description),
-                CallbackQueryHandler(button_callback)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex('^❌ Cancel$'), product_description),
+                CallbackQueryHandler(button_callback),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
             ],
             PRODUCT_PRICE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, product_price),
-                CallbackQueryHandler(button_callback)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex('^❌ Cancel$'), product_price),
+                CallbackQueryHandler(button_callback),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
             ],
             PRODUCT_IMAGE: [
                 MessageHandler(filters.PHOTO, product_image),
-                CallbackQueryHandler(button_callback)
+                CallbackQueryHandler(button_callback),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
             ],
             SCHEDULE_POST: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_post),
-                CallbackQueryHandler(button_callback)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex('^❌ Cancel$'), schedule_post),
+                CallbackQueryHandler(button_callback),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
             ],
             CONTACT_MESSAGE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_contact_message)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex('^❌ Cancel$'), handle_contact_message),
+                MessageHandler(filters.Regex('^❌ Cancel$'), handle_cancel),
             ]
         },
         fallbacks=[CommandHandler("cancel", cancel)]
@@ -1870,6 +2150,7 @@ def main() -> None:
         logger.info(f"Auto-posting scheduled every {AUTO_POST_INTERVAL} hours")
 
     # Start the Bot
+    logger.info("Starting bot...")
     application.run_polling()
     logger.info("Bot started")
 
